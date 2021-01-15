@@ -1,8 +1,11 @@
 [package]
 name = "header-slice"
+description = "Definitions for slices with headers, and a vec-like type with a header allocated inline."
 version = "0.1.0"
 authors = ["Spencer Young <spencerwyoung@outlook.com>"]
 edition = "2018"
+license-file = "LICENSE"
+repository = "https://github.com/youngspe/header-slice"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
