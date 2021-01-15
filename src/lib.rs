@@ -1,9 +1,13 @@
 #![no_std]
 extern crate alloc;
 
-pub mod header_slice;
-pub mod header_vec;
+#[macro_use]
 mod utils;
 
-pub use header_slice::HeaderSlice;
-pub use header_vec::HeaderVec;
+pub mod slice;
+#[cfg(test)]
+mod test;
+pub mod vec;
+
+pub use slice::HeaderSlice;
+pub use vec::HeaderVec;

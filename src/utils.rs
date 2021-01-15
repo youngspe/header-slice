@@ -1,5 +1,25 @@
-use crate::header_slice::HeaderSlice;
+use crate::slice::HeaderSlice;
 use core::ptr::{self, NonNull};
+
+macro_rules! partial_ord_chain {
+    ($($lhs:expr => $rhs:expr),* $(,)?) => {{
+        $({
+            let ordering = $lhs.partial_cmp(&$rhs)?;
+            if ordering != core::cmp::Ordering::Equal { return Some(ordering); }
+        })*
+        Some(core::cmp::Ordering::Equal)
+    }};
+}
+
+macro_rules! ord_chain {
+    ($($lhs:expr => $rhs:expr),* $(,)?) => {{
+        $({
+            let ordering = $lhs.cmp(&$rhs);
+            if ordering != core::cmp::Ordering::Equal { return ordering; }
+        })*
+        core::cmp::Ordering::Equal
+    }};
+}
 
 /// stand-in for the unstablem set_ptr_value feature
 pub fn set_ptr_value<T: ?Sized>(mut ptr: *const T, value: *const u8) -> *const T {

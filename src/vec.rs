@@ -1,10 +1,13 @@
-use crate::header_slice::HeaderSlice;
+use crate::slice::HeaderSlice;
 use crate::utils::{self, Pair};
 use alloc::alloc::{alloc, dealloc, realloc, Layout};
+use alloc::borrow::{Borrow, BorrowMut};
 use alloc::boxed::Box;
+use core::cmp::Ordering;
 use core::fmt::{self, Debug};
+use core::hash::{self, Hash};
 use core::iter;
-use core::mem::{self, ManuallyDrop, MaybeUninit};
+use core::mem::{self, MaybeUninit};
 use core::ops::{Add, AddAssign};
 use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
@@ -61,20 +64,21 @@ impl<H, T> HeaderVec<H, T> {
 
     /// Convert `ptr` to a mutable reference to a HeaderSlice with the entire capacity of the vector.
     fn inner_mut(&mut self) -> &mut HeaderSlice<H, MaybeUninit<T>> {
-        let ptr = utils::pair_as_slice_ptr(self.ptr, self.cap);
+        let ptr = utils::pair_as_slice_ptr(self.ptr, self.capacity());
         unsafe { &mut *ptr.as_ptr() }
     }
 
     /// Returns the `Layout` to be used when allocating the specified capacity.
     fn get_layout(cap: usize) -> Layout {
-        let head_layout = Layout::new::<H>();
-        let buf_layout = Layout::array::<T>(cap).unwrap();
-        head_layout.extend(buf_layout).unwrap().0.pad_to_align()
+        HeaderSlice::<H, T>::layout_for_len(cap)
     }
 
     /// Reallocate so that the vector has the exact requested capacity
     /// unsafe because the new capacity may be less than self.len
     unsafe fn realloc_exact(&mut self, count: usize) {
+        if mem::size_of::<T>() == 0 {
+            return;
+        }
         if count == self.cap {
             return;
         }
@@ -104,7 +108,7 @@ impl<H, T> HeaderVec<H, T> {
     unsafe fn realloc_for(&mut self, len: usize) {
         if len < self.len {
             self.shrink(len);
-        } else if len > self.cap {
+        } else if len > self.capacity() {
             self.grow(len);
         }
     }
@@ -174,6 +178,8 @@ impl<H, T> HeaderVec<H, T> {
             self.push(val);
             return;
         }
+
+        self.grow(self.len + 1);
         // let target_ptr = &mut self.inner_mut().body[index] as *mut MaybeUninit<T>;
         let target_ptr = unsafe { self.inner_mut().body.as_mut_ptr().add(index) };
         let copy_len = self.len - index;
@@ -182,7 +188,6 @@ impl<H, T> HeaderVec<H, T> {
         unsafe {
             ptr::write(target_ptr, MaybeUninit::new(val));
         };
-        self.grow(self.len);
         self.len += 1;
     }
 
@@ -208,8 +213,8 @@ impl<H, T> HeaderVec<H, T> {
             return;
         }
 
-        for index in new_len..self.len {
-            unsafe { self.drop_item(index) }
+        unsafe {
+            ptr::drop_in_place(&mut self.body[new_len..]);
         }
         unsafe { self.shrink(new_len) };
         self.len = new_len;
@@ -226,12 +231,6 @@ impl<H, T> HeaderVec<H, T> {
                 self.push(f());
             }
         }
-    }
-
-    /// Drops the element at the given index.
-    unsafe fn drop_item(&mut self, index: usize) {
-        let ptr = &mut self.inner_mut().body[index] as *mut _ as *mut T;
-        ptr::drop_in_place(ptr);
     }
 
     /// Creates a new instance of `HeaderVec` from the given header and iterator.
@@ -282,12 +281,25 @@ impl<H, T> HeaderVec<H, T> {
         dealloc(self.ptr.as_ptr() as *mut u8, Self::get_layout(self.cap));
     }
 
+    fn into_uninit(self) -> HeaderVec<MaybeUninit<H>, MaybeUninit<T>> {
+        unsafe { mem::transmute::<Self, HeaderVec<MaybeUninit<H>, MaybeUninit<T>>>(self) }
+    }
+
     /// Consumes the vector and returns an iterator of its values.
     pub fn into_values(self) -> IntoValuesIter<H, T> {
-        IntoValuesIter {
-            inner: ManuallyDrop::new(self),
+        self.into_header_values().1
+    }
+
+    /// Consumes the vector and returns its header and an iterator of its values.
+    pub fn into_header_values(self) -> (H, IntoValuesIter<H, T>) {
+        let uninit = self.into_uninit();
+
+        let head = unsafe { mem::transmute_copy::<MaybeUninit<H>, H>(&uninit.head) };
+        let values = IntoValuesIter {
+            inner: uninit,
             index: 0,
-        }
+        };
+        (head, values)
     }
 
     /// Delete all items in the vector and reallocate so there is no excess capacity.
@@ -299,11 +311,9 @@ impl<H, T> HeaderVec<H, T> {
     /// Delete all items in the vector without reallocating.
     pub fn clear_in_place(&mut self) {
         unsafe {
-            for i in 0..self.len {
-                self.drop_item(i);
-            }
-            self.len = 0;
+            ptr::drop_in_place(&mut self.body);
         }
+        self.len = 0;
     }
 
     /// Copies the contents of a slice into a new `HeaderVec`.
@@ -367,6 +377,30 @@ impl<H, T: Default> HeaderVec<H, T> {
     }
 }
 
+impl<H, T: Ord> HeaderVec<H, T> {
+    /// Assuming the vector is sorted, insert the given value into its sorted position.
+    /// Behavior is undefined if the vector is not sorted.
+    pub fn insert_sorted(&mut self, val: T) {
+        let index = self.body.binary_search(&val).unwrap_or_else(|x| x);
+        self.insert(index, val);
+    }
+
+    /// Assuming the vector is sorted, insert the given value into its sorted position
+    /// if it does not already exist in the vector.
+    /// If an element already exists that compares equal to `val`, reaplce it with
+    /// `val` and return its original value.
+    /// Behavior is undefined if the vector is not sorted.
+    pub fn insert_or_replace_sorted(&mut self, val: T) -> Option<T> {
+        match self.body.binary_search(&val) {
+            Ok(i) => Some(mem::replace(&mut self.body[i], val)),
+            Err(i) => {
+                self.insert(i, val);
+                None
+            }
+        }
+    }
+}
+
 impl<H, T> Deref for HeaderVec<H, T> {
     type Target = HeaderSlice<H, T>;
     fn deref(&self) -> &Self::Target {
@@ -380,12 +414,34 @@ impl<H, T> DerefMut for HeaderVec<H, T> {
     }
 }
 
+impl<H, T> AsRef<HeaderSlice<H, T>> for HeaderVec<H, T> {
+    fn as_ref(&self) -> &HeaderSlice<H, T> {
+        self.deref()
+    }
+}
+
+impl<H, T> AsMut<HeaderSlice<H, T>> for HeaderVec<H, T> {
+    fn as_mut(&mut self) -> &mut HeaderSlice<H, T> {
+        self.deref_mut()
+    }
+}
+
+impl<H, T> Borrow<HeaderSlice<H, T>> for HeaderVec<H, T> {
+    fn borrow(&self) -> &HeaderSlice<H, T> {
+        self.deref()
+    }
+}
+
+impl<H, T> BorrowMut<HeaderSlice<H, T>> for HeaderVec<H, T> {
+    fn borrow_mut(&mut self) -> &mut HeaderSlice<H, T> {
+        self.deref_mut()
+    }
+}
+
 impl<H, T> Drop for HeaderVec<H, T> {
     fn drop(&mut self) {
         unsafe {
-            for i in 0..self.len {
-                self.drop_item(i);
-            }
+            ptr::drop_in_place(self.deref_mut());
             self.dealloc();
         }
     }
@@ -419,6 +475,42 @@ impl<H, T, I: IntoIterator<Item = T>> Add<I> for HeaderVec<H, T> {
     }
 }
 
+impl<H, T, Rhs: ?Sized> PartialEq<Rhs> for HeaderVec<H, T>
+where
+    H: PartialEq,
+    T: PartialEq,
+    Rhs: Borrow<HeaderSlice<H, T>>,
+{
+    fn eq(&self, rhs: &Rhs) -> bool {
+        self.deref() == rhs.borrow()
+    }
+}
+
+impl<H: Eq, T: Eq> Eq for HeaderVec<H, T> {}
+
+impl<H, T, Rhs: ?Sized> PartialOrd<Rhs> for HeaderVec<H, T>
+where
+    H: PartialOrd,
+    T: PartialOrd,
+    Rhs: Borrow<HeaderSlice<H, T>>,
+{
+    fn partial_cmp(&self, rhs: &Rhs) -> Option<Ordering> {
+        self.deref().partial_cmp(rhs.borrow())
+    }
+}
+
+impl<H: Ord, T: Ord> Ord for HeaderVec<H, T> {
+    fn cmp(&self, rhs: &Self) -> Ordering {
+        self.deref().cmp(rhs.deref())
+    }
+}
+
+impl<H: Hash, T: Hash> Hash for HeaderVec<H, T> {
+    fn hash<S: hash::Hasher>(&self, state: &mut S) {
+        self.deref().hash(state)
+    }
+}
+
 impl<H: Debug, T: Debug> Debug for HeaderVec<H, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let hslice: &HeaderSlice<H, T> = self.deref();
@@ -432,9 +524,44 @@ impl<H: Default, T> iter::FromIterator<T> for HeaderVec<H, T> {
     }
 }
 
+impl<H, T> From<Box<HeaderSlice<H, T>>> for HeaderVec<H, T> {
+    fn from(src: Box<HeaderSlice<H, T>>) -> Self {
+        Self::from_box(src)
+    }
+}
+
+impl<H, T> From<HeaderVec<H, T>> for Box<HeaderSlice<H, T>> {
+    fn from(src: HeaderVec<H, T>) -> Self {
+        src.into_box()
+    }
+}
+
+impl<H: Default, T> Default for HeaderVec<H, T> {
+    fn default() -> Self {
+        Self::new(H::default())
+    }
+}
+
 pub struct IntoValuesIter<H, T> {
-    inner: ManuallyDrop<HeaderVec<H, T>>,
+    inner: HeaderVec<MaybeUninit<H>, MaybeUninit<T>>,
     index: usize,
+}
+
+impl<H, T> IntoValuesIter<H, T> {
+    fn valid_slice_ptr(this: *mut Self) -> *mut [T] {
+        let body = unsafe { &mut (*this).inner.body };
+        let index = unsafe { (*this).index };
+        &mut body[index..] as *mut [MaybeUninit<T>] as *mut [T]
+    }
+
+    /// Returns a slice of elements that have not yet been yielded by the iterator.
+    fn valid_slice(&self) -> &[T] {
+        unsafe { &*Self::valid_slice_ptr(self as *const Self as *mut Self) }
+    }
+    /// Returns a mutable slice of elements that have not yet been yielded by the iterator.
+    fn valid_slice_mut(&mut self) -> &mut [T] {
+        unsafe { &mut *Self::valid_slice_ptr(self as *mut Self) }
+    }
 }
 
 impl<H, T> Iterator for IntoValuesIter<H, T> {
@@ -444,14 +571,36 @@ impl<H, T> Iterator for IntoValuesIter<H, T> {
             return None;
         }
 
-        let val = unsafe { ptr::read(self.inner.inner_mut().body[self.index].as_ptr()) };
+        let val: T = unsafe { mem::transmute_copy(&self.inner.body[self.index]) };
         self.index += 1;
-
-        if self.index == self.inner.len() {
-            unsafe { self.inner.dealloc() };
-        }
-
         Some(val)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.inner.len() - self.index;
+        (len, Some(len))
+    }
+}
+
+impl<H, T> ExactSizeIterator for IntoValuesIter<H, T> {}
+
+impl<H, T> Drop for IntoValuesIter<H, T> {
+    fn drop(&mut self) {
+        unsafe {
+            ptr::drop_in_place(self.valid_slice_mut());
+        }
+    }
+}
+
+impl<H, T: Clone> Clone for IntoValuesIter<H, T> {
+    fn clone(&self) -> Self {
+        // make an iterator that clones each element and converts them back to MaybeUninit
+        let iter = self.valid_slice().iter().cloned().map(MaybeUninit::new);
+        let new_vec = HeaderVec::from_iter(MaybeUninit::uninit(), iter);
+        Self {
+            inner: new_vec,
+            index: 0,
+        }
     }
 }
 
@@ -466,14 +615,14 @@ macro_rules! header_vec {
     ($h:expr; $($v:expr),* $(,)?) => {{
         let mut src = [$($v),*];
         let v = unsafe {
-            $crate::pair::HeaderVec::copy_from_ptr_unsafe($h, src.as_mut_ptr(), src.len())
+            $crate::vec::HeaderVec::copy_from_ptr_unsafe($h, src.as_mut_ptr(), src.len())
         };
         core::mem::forget(src);
         v
     }};
     // Take a cloneable element and desired length:
     ($h:expr; $v:expr; $len:expr) => {{
-        let mut v = $crate::pair::HeaderVec::with_capacity($len);
+        let mut v = $crate::vec::HeaderVec::with_capacity($h, $len);
         v.resize($len, $v);
         v
     }};
