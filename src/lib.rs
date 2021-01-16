@@ -4,6 +4,7 @@ extern crate alloc;
 #[macro_use]
 mod utils;
 
+pub mod pair;
 pub mod slice;
 #[cfg(test)]
 mod test;

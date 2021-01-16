@@ -1,5 +1,6 @@
+use crate::pair::Pair;
 use crate::slice::HeaderSlice;
-use crate::utils::{self, Pair};
+use crate::utils;
 use alloc::alloc::{alloc, dealloc, realloc, Layout};
 use alloc::borrow::{Borrow, BorrowMut};
 use alloc::boxed::Box;
@@ -32,7 +33,7 @@ impl<H, T> HeaderVec<H, T> {
 
     /// Returns a pointer to a `HeaderSlice` representing this vector.
     pub fn as_ptr(&self) -> NonNull<HeaderSlice<H, T>> {
-        utils::pair_as_slice_ptr(self.ptr.cast::<Pair<H, T>>(), self.len)
+        crate::pair::pair_as_slice_ptr(self.ptr.cast::<Pair<H, T>>(), self.len)
     }
 
     /// Returns the raw parts (ptr, length, capacity) of the vector without consuming it.
@@ -64,7 +65,7 @@ impl<H, T> HeaderVec<H, T> {
 
     /// Convert `ptr` to a mutable reference to a HeaderSlice with the entire capacity of the vector.
     fn inner_mut(&mut self) -> &mut HeaderSlice<H, MaybeUninit<T>> {
-        let ptr = utils::pair_as_slice_ptr(self.ptr, self.capacity());
+        let ptr = crate::pair::pair_as_slice_ptr(self.ptr, self.capacity());
         unsafe { &mut *ptr.as_ptr() }
     }
 
