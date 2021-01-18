@@ -317,6 +317,11 @@ impl<H, T> HeaderVec<H, T> {
         self.len = 0;
     }
 
+    pub unsafe fn dealloc_without_dropping(mut self) {
+        self.dealloc();
+        mem::forget(self);
+    }
+
     /// Copies the contents of a slice into a new `HeaderVec`.
     /// Do not use or drop the contents of the original slice after this.
     pub unsafe fn copy_from_ptr_unsafe(head: H, src: *mut T, len: usize) -> Self {
