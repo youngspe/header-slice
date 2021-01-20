@@ -331,6 +331,40 @@ impl<H, T> HeaderVec<H, T> {
         this.len = len;
         this
     }
+
+    unsafe fn cast<H2, T2>(self) -> HeaderVec<H2, T2> {
+        let v = HeaderVec {
+            ptr: self.ptr.cast(),
+            len: self.len,
+            cap: self.cap,
+        };
+        mem::forget(self);
+        v
+    }
+}
+
+impl<H, T> HeaderVec<H, MaybeUninit<T>> {
+    pub fn new_uninit_values(head: H, len: usize) -> Self {
+        let mut this = Self::with_capacity(head, len);
+        this.len = len;
+        this
+    }
+
+    pub unsafe fn assume_init_values(self) -> HeaderVec<H, T> {
+        self.cast()
+    }
+}
+
+impl<H, T> HeaderVec<MaybeUninit<H>, MaybeUninit<T>> {
+    pub unsafe fn assume_init(self) -> HeaderVec<H, T> {
+        self.cast()
+    }
+}
+
+impl<H, T> HeaderVec<MaybeUninit<H>, T> {
+    pub unsafe fn assume_init_head(self) -> HeaderVec<H, T> {
+        self.cast()
+    }
 }
 
 impl<H, T: Copy> HeaderVec<H, T> {
@@ -620,6 +654,7 @@ macro_rules! header_vec {
     // Take a list of elements:
     ($h:expr; $($v:expr),* $(,)?) => {{
         let mut src = [$($v),*];
+        #[allow(unused_unsafe)]
         let v = unsafe {
             $crate::vec::HeaderVec::copy_from_ptr_unsafe($h, src.as_mut_ptr(), src.len())
         };

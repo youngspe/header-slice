@@ -1,7 +1,7 @@
 [package]
 name = "header-slice"
 description = "Definitions for slices with headers, and a vec-like type with a header allocated inline."
-version = "0.1.2"
+version = "0.1.3"
 authors = ["Spencer Young <spencerwyoung@outlook.com>"]
 edition = "2018"
 license-file = "LICENSE"
